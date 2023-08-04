@@ -1,4 +1,4 @@
-FROM golang:1.17-bullseye
+FROM golang:1.19.11-bullseye
 
 
 # Use mirrors for poor network...
