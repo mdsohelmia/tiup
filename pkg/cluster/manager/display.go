@@ -42,7 +42,6 @@ import (
 	"github.com/pingcap/tiup/pkg/set"
 	"github.com/pingcap/tiup/pkg/tui"
 	"github.com/pingcap/tiup/pkg/utils"
-	"go.uber.org/zap"
 )
 
 // DisplayOption represents option of display command
@@ -51,6 +50,8 @@ type DisplayOption struct {
 	ShowUptime     bool
 	ShowProcess    bool
 	ShowManageHost bool
+	ShowNuma       bool
+	ShowVersions   bool
 }
 
 // InstInfo represents an instance info
@@ -68,6 +69,9 @@ type InstInfo struct {
 	Since       string `json:"since"`
 	DataDir     string `json:"data_dir"`
 	DeployDir   string `json:"deploy_dir"`
+	NumaNode    string `json:"numa_node"`
+	NumaCores   string `json:"numa_cores"`
+	Version     string `json:"version"`
 
 	ComponentName string
 	Port          int
@@ -200,6 +204,13 @@ func (m *Manager) Display(dopt DisplayOption, opt operator.Options) error {
 	if dopt.ShowUptime {
 		rowHead = append(rowHead, "Since")
 	}
+	if dopt.ShowNuma {
+		rowHead = append(rowHead, "Numa Node", "Numa Cores")
+	}
+	if dopt.ShowVersions {
+		rowHead = append(rowHead, "Version")
+	}
+
 	rowHead = append(rowHead, "Data Dir", "Deploy Dir")
 	clusterTable = append(clusterTable, rowHead)
 
@@ -226,6 +237,13 @@ func (m *Manager) Display(dopt DisplayOption, opt operator.Options) error {
 		if dopt.ShowUptime {
 			row = append(row, v.Since)
 		}
+		if dopt.ShowNuma {
+			row = append(row, v.NumaNode, v.NumaCores)
+		}
+		if dopt.ShowVersions {
+			row = append(row, v.Version)
+		}
+
 		row = append(row, v.DataDir, v.DeployDir)
 		clusterTable = append(clusterTable, row)
 
@@ -233,7 +251,7 @@ func (m *Manager) Display(dopt DisplayOption, opt operator.Options) error {
 			continue
 		}
 		if strings.HasPrefix(v.Status, "Up") || strings.HasPrefix(v.Status, "Healthy") {
-			instAddr := utils.JoinHostPort(v.Host, v.Port)
+			instAddr := utils.JoinHostPort(v.ManageHost, v.Port)
 			masterActive = append(masterActive, instAddr)
 		}
 	}
@@ -568,7 +586,7 @@ func (m *Manager) GetClusterTopology(dopt DisplayOption, opt operator.Options) (
 	}
 
 	clusterInstInfos := []InstInfo{}
-
+	systemdMode := string(topo.BaseTopo().GlobalOptions.SystemdMode)
 	topo.IterInstance(func(ins spec.Instance) {
 		// apply role filter
 		if len(filterRoles) > 0 && !filterRoles.Exist(ins.Role()) {
@@ -610,8 +628,9 @@ func (m *Manager) GetClusterTopology(dopt DisplayOption, opt operator.Options) (
 			e, found := ctxt.GetInner(ctx).GetExecutor(ins.GetManageHost())
 			if found {
 				var active string
+				var systemdSince time.Duration
 				nctx := checkpoint.NewContext(ctx)
-				active, memory, _ = operator.GetServiceStatus(nctx, e, ins.ServiceName())
+				active, memory, systemdSince, _ = operator.GetServiceStatus(nctx, e, ins.ServiceName(), systemdMode, systemdMode)
 				if status == "-" {
 					if active == "active" {
 						status = "Up"
@@ -620,7 +639,7 @@ func (m *Manager) GetClusterTopology(dopt DisplayOption, opt operator.Options) (
 					}
 				}
 				if dopt.ShowUptime && since == "-" {
-					since = formatInstanceSince(parseSystemctlSince(active))
+					since = formatInstanceSince(systemdSince)
 				}
 			}
 		}
@@ -654,6 +673,9 @@ func (m *Manager) GetClusterTopology(dopt DisplayOption, opt operator.Options) (
 			ComponentName: ins.ComponentName(),
 			Port:          ins.GetPort(),
 			Since:         since,
+			NumaNode:      utils.Ternary(ins.GetNumaNode() == "", "-", ins.GetNumaNode()).(string),
+			NumaCores:     utils.Ternary(ins.GetNumaCores() == "", "-", ins.GetNumaCores()).(string),
+			Version:       ins.CalculateVersion(base.Version),
 		})
 		mu.Unlock()
 	}, opt.Concurrency)
@@ -733,37 +755,6 @@ func formatInstanceSince(uptime time.Duration) string {
 	return strings.Join(parts, "")
 }
 
-// `systemctl status xxx.service` returns as below
-// Active: active (running) since Sat 2021-03-27 10:51:11 CST; 41min ago
-func parseSystemctlSince(str string) (dur time.Duration) {
-	// if service is not found or other error, don't need to parse it
-	if str == "" {
-		return 0
-	}
-	defer func() {
-		if dur == 0 {
-			zap.L().Warn("failed to parse systemctl since", zap.String("value", str))
-		}
-	}()
-	parts := strings.Split(str, ";")
-	if len(parts) != 2 {
-		return
-	}
-	parts = strings.Split(parts[0], " ")
-	if len(parts) < 3 {
-		return
-	}
-
-	dateStr := strings.Join(parts[len(parts)-3:], " ")
-
-	tm, err := time.Parse("2006-01-02 15:04:05 MST", dateStr)
-	if err != nil {
-		return
-	}
-
-	return time.Since(tm)
-}
-
 // SetSSHKeySet set ssh key set.
 func SetSSHKeySet(ctx context.Context, privateKeyPath string, publicKeyPath string) error {
 	ctxt.GetInner(ctx).PrivateKeyPath = privateKeyPath
@@ -809,13 +800,8 @@ func (m *Manager) DisplayDashboardInfo(clusterName string, timeout time.Duration
 		return err
 	}
 
-	pdEndpoints := make([]string, 0)
-	for _, pd := range metadata.Topology.PDServers {
-		pdEndpoints = append(pdEndpoints, utils.JoinHostPort(pd.Host, pd.ClientPort))
-	}
-
 	ctx := context.WithValue(context.Background(), logprinter.ContextKeyLogger, m.logger)
-	pdAPI := api.NewPDClient(ctx, pdEndpoints, timeout, tlsCfg)
+	pdAPI := api.NewPDClient(ctx, metadata.Topology.GetPDListWithManageHost(), timeout, tlsCfg)
 	dashboardAddr, err := pdAPI.GetDashboardAddress()
 	if err != nil {
 		return fmt.Errorf("failed to retrieve TiDB Dashboard instance from PD: %s", err)

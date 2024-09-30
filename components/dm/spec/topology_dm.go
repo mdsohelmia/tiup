@@ -36,9 +36,10 @@ const (
 )
 
 var (
-	globalOptionTypeName  = reflect.TypeOf(GlobalOptions{}).Name()
-	monitorOptionTypeName = reflect.TypeOf(MonitoredOptions{}).Name()
-	serverConfigsTypeName = reflect.TypeOf(DMServerConfigs{}).Name()
+	globalOptionTypeName     = reflect.TypeOf(GlobalOptions{}).Name()
+	monitorOptionTypeName    = reflect.TypeOf(MonitoredOptions{}).Name()
+	serverConfigsTypeName    = reflect.TypeOf(DMServerConfigs{}).Name()
+	componentSourcesTypeName = reflect.TypeOf(ComponentSources{}).Name()
 )
 
 func setDefaultDir(parent, role, port string, field reflect.Value) {
@@ -69,7 +70,7 @@ func isSkipField(field reflect.Value) bool {
 		field = field.Elem()
 	}
 	tp := field.Type().Name()
-	return tp == globalOptionTypeName || tp == monitorOptionTypeName || tp == serverConfigsTypeName
+	return tp == globalOptionTypeName || tp == monitorOptionTypeName || tp == serverConfigsTypeName || tp == componentSourcesTypeName
 }
 
 type (
@@ -95,10 +96,17 @@ type (
 		Grafana map[string]string `yaml:"grafana"`
 	}
 
+	// ComponentSources represents the source of components
+	ComponentSources struct {
+		Master string `yaml:"master,omitempty"`
+		Worker string `yaml:"worker,omitempty"`
+	}
+
 	// Specification represents the specification of topology.yaml
 	Specification struct {
 		GlobalOptions    GlobalOptions            `yaml:"global,omitempty" validate:"global:editable"`
 		MonitoredOptions *MonitoredOptions        `yaml:"monitored,omitempty" validate:"monitored:editable"`
+		ComponentSources ComponentSources         `yaml:"component_sources,omitempty" validate:"component_sources:editable"`
 		ServerConfigs    DMServerConfigs          `yaml:"server_configs,omitempty" validate:"server_configs:ignore"`
 		Masters          []*MasterSpec            `yaml:"master_servers"`
 		Workers          []*WorkerSpec            `yaml:"worker_servers"`
@@ -122,7 +130,7 @@ func AllDMComponentNames() (roles []string) {
 // MasterSpec represents the Master topology specification in topology.yaml
 type MasterSpec struct {
 	Host           string `yaml:"host"`
-	ManageHost     string `yaml:"manage_host,omitempty"`
+	ManageHost     string `yaml:"manage_host,omitempty" validate:"manage_host:editable"`
 	SSHPort        int    `yaml:"ssh_port,omitempty" validate:"ssh_port:editable"`
 	Imported       bool   `yaml:"imported,omitempty"`
 	Patched        bool   `yaml:"patched,omitempty"`
@@ -134,6 +142,7 @@ type MasterSpec struct {
 	DeployDir       string          `yaml:"deploy_dir,omitempty"`
 	DataDir         string          `yaml:"data_dir,omitempty"`
 	LogDir          string          `yaml:"log_dir,omitempty"`
+	Source          string          `yaml:"source,omitempty" validate:"source:editable"`
 	NumaNode        string          `yaml:"numa_node,omitempty" validate:"numa_node:editable"`
 	Config          map[string]any  `yaml:"config,omitempty" validate:"config:ignore"`
 	ResourceControl ResourceControl `yaml:"resource_control,omitempty" validate:"resource_control:editable"`
@@ -205,7 +214,7 @@ func (s *MasterSpec) GetAdvertisePeerURL(enableTLS bool) string {
 // WorkerSpec represents the Master topology specification in topology.yaml
 type WorkerSpec struct {
 	Host           string `yaml:"host"`
-	ManageHost     string `yaml:"manage_host,omitempty"`
+	ManageHost     string `yaml:"manage_host,omitempty" validate:"manage_host:editable"`
 	SSHPort        int    `yaml:"ssh_port,omitempty" validate:"ssh_port:editable"`
 	Imported       bool   `yaml:"imported,omitempty"`
 	Patched        bool   `yaml:"patched,omitempty"`
@@ -216,6 +225,7 @@ type WorkerSpec struct {
 	DeployDir       string          `yaml:"deploy_dir,omitempty"`
 	DataDir         string          `yaml:"data_dir,omitempty"`
 	LogDir          string          `yaml:"log_dir,omitempty"`
+	Source          string          `yaml:"source,omitempty" validate:"source:editable"`
 	NumaNode        string          `yaml:"numa_node,omitempty" validate:"numa_node:editable"`
 	Config          map[string]any  `yaml:"config,omitempty" validate:"config:ignore"`
 	ResourceControl ResourceControl `yaml:"resource_control,omitempty" validate:"resource_control:editable"`
@@ -675,7 +685,7 @@ func (s *Specification) BaseTopo() *spec.BaseTopo {
 	return &spec.BaseTopo{
 		GlobalOptions:    &s.GlobalOptions,
 		MonitoredOptions: s.GetMonitoredOptions(),
-		MasterList:       s.GetMasterList(),
+		MasterList:       s.GetMasterListWithManageHost(),
 		Monitors:         s.Monitors,
 		Grafanas:         s.Grafanas,
 		Alertmanagers:    s.Alertmanagers,
@@ -701,12 +711,16 @@ func (s *Specification) MergeTopo(rhs spec.Topology) spec.Topology {
 	return s.Merge(other)
 }
 
-// GetMasterList returns a list of Master API hosts of the current cluster
-func (s *Specification) GetMasterList() []string {
+// GetMasterListWithManageHost returns a list of Master API hosts of the current cluster
+func (s *Specification) GetMasterListWithManageHost() []string {
 	var masterList []string
 
 	for _, master := range s.Masters {
-		masterList = append(masterList, utils.JoinHostPort(master.Host, master.Port))
+		host := master.Host
+		if master.ManageHost != "" {
+			host = master.ManageHost
+		}
+		masterList = append(masterList, utils.JoinHostPort(host, master.Port))
 	}
 
 	return masterList

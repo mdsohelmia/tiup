@@ -37,7 +37,7 @@ import (
 // TiSparkMasterSpec is the topology specification for TiSpark master node
 type TiSparkMasterSpec struct {
 	Host           string            `yaml:"host"`
-	ManageHost     string            `yaml:"manage_host,omitempty"`
+	ManageHost     string            `yaml:"manage_host,omitempty" validate:"manage_host:editable"`
 	ListenHost     string            `yaml:"listen_host,omitempty"`
 	SSHPort        int               `yaml:"ssh_port,omitempty" validate:"ssh_port:editable"`
 	Imported       bool              `yaml:"imported,omitempty"`
@@ -141,6 +141,21 @@ func (c *TiSparkMasterComponent) Role() string {
 	return RoleTiSparkMaster
 }
 
+// Source implements Component interface.
+func (c *TiSparkMasterComponent) Source() string {
+	return ComponentTiSpark
+}
+
+// CalculateVersion implements the Component interface
+func (c *TiSparkMasterComponent) CalculateVersion(clusterVersion string) string {
+	return ""
+}
+
+// SetVersion implements Component interface.
+func (c *TiSparkMasterComponent) SetVersion(version string) {
+	// should never be calles
+}
+
 // Instances implements Component interface.
 func (c *TiSparkMasterComponent) Instances() []Instance {
 	ins := make([]Instance, 0, len(c.Topology.TiSparkMasters))
@@ -154,6 +169,8 @@ func (c *TiSparkMasterComponent) Instances() []Instance {
 				Host:         s.Host,
 				Port:         s.Port,
 				SSHP:         s.SSHPort,
+				NumaNode:     "",
+				NumaCores:    "",
 
 				Ports: []int{
 					s.Port,
@@ -168,6 +185,7 @@ func (c *TiSparkMasterComponent) Instances() []Instance {
 				UptimeFn: func(_ context.Context, timeout time.Duration, tlsCfg *tls.Config) time.Duration {
 					return 0
 				},
+				Component: c,
 			},
 			topo: c.Topology,
 		})
@@ -238,8 +256,14 @@ func (i *TiSparkMasterInstance) InitConfig(
 	if err := e.Transfer(ctx, sysCfg, tgt, false, 0, false); err != nil {
 		return errors.Annotatef(err, "transfer from %s to %s failed", sysCfg, tgt)
 	}
-	cmd := fmt.Sprintf("mv %s /etc/systemd/system/%s-%d.service", tgt, comp, port)
-	if _, _, err := e.Execute(ctx, cmd, true); err != nil {
+	systemdDir := "/etc/systemd/system/"
+	sudo := true
+	if i.topo.BaseTopo().GlobalOptions.SystemdMode == UserMode {
+		systemdDir = "~/.config/systemd/user/"
+		sudo = false
+	}
+	cmd := fmt.Sprintf("mv %s %s%s-%d.service", tgt, systemdDir, comp, port)
+	if _, _, err := e.Execute(ctx, cmd, sudo); err != nil {
 		return errors.Annotatef(err, "execute: %s", cmd)
 	}
 
@@ -321,6 +345,21 @@ func (c *TiSparkWorkerComponent) Role() string {
 	return RoleTiSparkWorker
 }
 
+// Source implements Component interface.
+func (c *TiSparkWorkerComponent) Source() string {
+	return ComponentTiSpark
+}
+
+// CalculateVersion implements the Component interface
+func (c *TiSparkWorkerComponent) CalculateVersion(clusterVersion string) string {
+	return ""
+}
+
+// SetVersion implements Component interface.
+func (c *TiSparkWorkerComponent) SetVersion(version string) {
+	// should never be called
+}
+
 // Instances implements Component interface.
 func (c *TiSparkWorkerComponent) Instances() []Instance {
 	ins := make([]Instance, 0, len(c.Topology.TiSparkWorkers))
@@ -333,6 +372,8 @@ func (c *TiSparkWorkerComponent) Instances() []Instance {
 				Host:         s.Host,
 				Port:         s.Port,
 				SSHP:         s.SSHPort,
+				NumaNode:     "",
+				NumaCores:    "",
 
 				Ports: []int{
 					s.Port,
@@ -347,6 +388,7 @@ func (c *TiSparkWorkerComponent) Instances() []Instance {
 				UptimeFn: func(_ context.Context, timeout time.Duration, tlsCfg *tls.Config) time.Duration {
 					return 0
 				},
+				Component: c,
 			},
 			topo: c.Topology,
 		})
@@ -399,8 +441,14 @@ func (i *TiSparkWorkerInstance) InitConfig(
 	if err := e.Transfer(ctx, sysCfg, tgt, false, 0, false); err != nil {
 		return errors.Annotatef(err, "transfer from %s to %s failed", sysCfg, tgt)
 	}
-	cmd := fmt.Sprintf("mv %s /etc/systemd/system/%s-%d.service", tgt, comp, port)
-	if _, _, err := e.Execute(ctx, cmd, true); err != nil {
+	systemdDir := "/etc/systemd/system/"
+	sudo := true
+	if i.topo.BaseTopo().GlobalOptions.SystemdMode == UserMode {
+		systemdDir = "~/.config/systemd/user/"
+		sudo = false
+	}
+	cmd := fmt.Sprintf("mv %s %s%s-%d.service", tgt, systemdDir, comp, port)
+	if _, _, err := e.Execute(ctx, cmd, sudo); err != nil {
 		return errors.Annotatef(err, "execute: %s", cmd)
 	}
 

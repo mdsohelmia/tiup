@@ -40,7 +40,10 @@ const (
 	ComponentTiDB             = "tidb"
 	ComponentTiKV             = "tikv"
 	ComponentPD               = "pd"
+	ComponentTSO              = "tso"
+	ComponentScheduling       = "scheduling"
 	ComponentTiFlash          = "tiflash"
+	ComponentTiProxy          = "tiproxy"
 	ComponentGrafana          = "grafana"
 	ComponentDrainer          = "drainer"
 	ComponentDashboard        = "tidb-dashboard"
@@ -53,7 +56,6 @@ const (
 	ComponentDMMaster         = "dm-master"
 	ComponentDMWorker         = "dm-worker"
 	ComponentPrometheus       = "prometheus"
-	ComponentPushwaygate      = "pushgateway"
 	ComponentBlackboxExporter = "blackbox_exporter"
 	ComponentNodeExporter     = "node_exporter"
 	ComponentCheckCollector   = "insight"
@@ -70,7 +72,10 @@ var (
 type Component interface {
 	Name() string
 	Role() string
+	Source() string
 	Instances() []Instance
+	CalculateVersion(string) string
+	SetVersion(string)
 }
 
 // RollingUpdateInstance represent a instance need to transfer state when restart.
@@ -89,6 +94,7 @@ type Instance interface {
 	ScaleConfig(ctx context.Context, e ctxt.Executor, topo Topology, clusterName string, clusterVersion string, deployUser string, paths meta.DirPaths) error
 	PrepareStart(ctx context.Context, tlsCfg *tls.Config) error
 	ComponentName() string
+	ComponentSource() string
 	InstanceName() string
 	ServiceName() string
 	ResourceControl() meta.ResourceControl
@@ -96,6 +102,8 @@ type Instance interface {
 	GetManageHost() string
 	GetPort() int
 	GetSSHPort() int
+	GetNumaNode() string
+	GetNumaCores() string
 	DeployDir() string
 	UsedPorts() []int
 	UsedDirs() []string
@@ -107,6 +115,8 @@ type Instance interface {
 	Arch() string
 	IsPatched() bool
 	SetPatched(bool)
+	CalculateVersion(string) string
+	// SetVersion(string)
 	setTLSConfig(ctx context.Context, enableTLS bool, configs map[string]any, paths meta.DirPaths) (map[string]any, error)
 }
 
@@ -142,11 +152,16 @@ type BaseInstance struct {
 	ListenHost string
 	Port       int
 	SSHP       int
+	Source     string
+	NumaNode   string
+	NumaCores  string
 
 	Ports    []int
 	Dirs     []string
 	StatusFn func(ctx context.Context, timeout time.Duration, tlsCfg *tls.Config, pdHosts ...string) string
 	UptimeFn func(ctx context.Context, timeout time.Duration, tlsCfg *tls.Config) time.Duration
+
+	Component Component
 }
 
 // Ready implements Instance interface
@@ -171,13 +186,19 @@ func (i *BaseInstance) InitConfig(ctx context.Context, e ctxt.Executor, opt Glob
 		return nil
 	}
 
+	systemdMode := opt.SystemdMode
+	if len(systemdMode) == 0 {
+		systemdMode = SystemMode
+	}
+
 	resource := MergeResourceControl(opt.ResourceControl, i.ResourceControl())
 	systemCfg := system.NewConfig(comp, user, paths.Deploy).
 		WithMemoryLimit(resource.MemoryLimit).
 		WithCPUQuota(resource.CPUQuota).
 		WithLimitCORE(resource.LimitCORE).
 		WithIOReadBandwidthMax(resource.IOReadBandwidthMax).
-		WithIOWriteBandwidthMax(resource.IOWriteBandwidthMax)
+		WithIOWriteBandwidthMax(resource.IOWriteBandwidthMax).
+		WithSystemdMode(string(systemdMode))
 
 	// For not auto start if using binlogctl to offline.
 	// bad design
@@ -192,8 +213,14 @@ func (i *BaseInstance) InitConfig(ctx context.Context, e ctxt.Executor, opt Glob
 	if err := e.Transfer(ctx, sysCfg, tgt, false, 0, false); err != nil {
 		return errors.Annotatef(err, "transfer from %s to %s failed", sysCfg, tgt)
 	}
-	cmd := fmt.Sprintf("mv %s /etc/systemd/system/%s-%d.service", tgt, comp, port)
-	if _, _, err := e.Execute(ctx, cmd, true); err != nil {
+	systemdDir := "/etc/systemd/system/"
+	sudo := true
+	if opt.SystemdMode == UserMode {
+		systemdDir = "~/.config/systemd/user/"
+		sudo = false
+	}
+	cmd := fmt.Sprintf("mv %s %s%s-%d.service", tgt, systemdDir, comp, port)
+	if _, _, err := e.Execute(ctx, cmd, sudo); err != nil {
 		return errors.Annotatef(err, "execute: %s", cmd)
 	}
 
@@ -302,6 +329,16 @@ func (i *BaseInstance) ComponentName() string {
 	return i.Name
 }
 
+// ComponentSource implements Instance interface
+func (i *BaseInstance) ComponentSource() string {
+	if i.Source != "" {
+		return i.Source
+	} else if i.Component.Source() != "" {
+		return i.Component.Source()
+	}
+	return i.ComponentName()
+}
+
 // InstanceName implements Instance interface
 func (i *BaseInstance) InstanceName() string {
 	if i.Port > 0 {
@@ -353,6 +390,16 @@ func (i *BaseInstance) GetListenHost() string {
 // GetSSHPort implements Instance interface
 func (i *BaseInstance) GetSSHPort() int {
 	return i.SSHP
+}
+
+// GetNumaNode implements Instance interface
+func (i *BaseInstance) GetNumaNode() string {
+	return i.NumaNode
+}
+
+// GetNumaCores implements Instance interface
+func (i *BaseInstance) GetNumaCores() string {
+	return i.NumaCores
 }
 
 // DeployDir implements Instance interface
@@ -432,6 +479,11 @@ func (i *BaseInstance) SetPatched(p bool) {
 		return
 	}
 	v.SetBool(p)
+}
+
+// CalculateVersion implements the Instance interface
+func (i *BaseInstance) CalculateVersion(globalVersion string) string {
+	return i.Component.CalculateVersion(globalVersion)
 }
 
 // PrepareStart checks instance requirements before starting

@@ -32,7 +32,7 @@ import (
 // PumpSpec represents the Pump topology specification in topology.yaml
 type PumpSpec struct {
 	Host            string               `yaml:"host"`
-	ManageHost      string               `yaml:"manage_host,omitempty"`
+	ManageHost      string               `yaml:"manage_host,omitempty" validate:"manage_host:editable"`
 	SSHPort         int                  `yaml:"ssh_port,omitempty" validate:"ssh_port:editable"`
 	Imported        bool                 `yaml:"imported,omitempty"`
 	Patched         bool                 `yaml:"patched,omitempty"`
@@ -42,6 +42,7 @@ type PumpSpec struct {
 	DataDir         string               `yaml:"data_dir,omitempty"`
 	LogDir          string               `yaml:"log_dir,omitempty"`
 	Offline         bool                 `yaml:"offline,omitempty"`
+	Source          string               `yaml:"source,omitempty" validate:"source:editable"`
 	NumaNode        string               `yaml:"numa_node,omitempty" validate:"numa_node:editable"`
 	Config          map[string]any       `yaml:"config,omitempty" validate:"config:ignore"`
 	ResourceControl meta.ResourceControl `yaml:"resource_control,omitempty" validate:"resource_control:editable"`
@@ -55,7 +56,7 @@ func (s *PumpSpec) Status(ctx context.Context, timeout time.Duration, tlsCfg *tl
 		timeout = statusQueryTimeout
 	}
 
-	state := statusByHost(s.Host, s.Port, "/status", timeout, tlsCfg)
+	state := statusByHost(s.GetManageHost(), s.Port, "/status", timeout, tlsCfg)
 
 	if s.Offline {
 		binlogClient, err := api.NewBinlogClient(pdList, timeout, tlsCfg)
@@ -93,6 +94,14 @@ func (s *PumpSpec) GetMainPort() int {
 	return s.Port
 }
 
+// GetManageHost returns the manage host of the instance
+func (s *PumpSpec) GetManageHost() string {
+	if s.ManageHost != "" {
+		return s.ManageHost
+	}
+	return s.Host
+}
+
 // IsImported returns if the node is imported from TiDB-Ansible
 func (s *PumpSpec) IsImported() bool {
 	return s.Imported
@@ -116,6 +125,29 @@ func (c *PumpComponent) Role() string {
 	return ComponentPump
 }
 
+// Source implements Component interface.
+func (c *PumpComponent) Source() string {
+	source := c.Topology.ComponentSources.Pump
+	if source != "" {
+		return source
+	}
+	return ComponentPump
+}
+
+// CalculateVersion implements the Component interface
+func (c *PumpComponent) CalculateVersion(clusterVersion string) string {
+	version := c.Topology.ComponentVersions.Pump
+	if version == "" {
+		version = clusterVersion
+	}
+	return version
+}
+
+// SetVersion implements Component interface.
+func (c *PumpComponent) SetVersion(version string) {
+	c.Topology.ComponentVersions.Pump = version
+}
+
 // Instances implements Component interface.
 func (c *PumpComponent) Instances() []Instance {
 	ins := make([]Instance, 0, len(c.Topology.PumpServers))
@@ -126,8 +158,12 @@ func (c *PumpComponent) Instances() []Instance {
 			Name:         c.Name(),
 			Host:         s.Host,
 			ManageHost:   s.ManageHost,
+			ListenHost:   c.Topology.BaseTopo().GlobalOptions.ListenHost,
 			Port:         s.Port,
 			SSHP:         s.SSHPort,
+			Source:       s.Source,
+			NumaNode:     s.NumaNode,
+			NumaCores:    "",
 
 			Ports: []int{
 				s.Port,
@@ -138,8 +174,9 @@ func (c *PumpComponent) Instances() []Instance {
 			},
 			StatusFn: s.Status,
 			UptimeFn: func(_ context.Context, timeout time.Duration, tlsCfg *tls.Config) time.Duration {
-				return UptimeByHost(s.Host, s.Port, timeout, tlsCfg)
+				return UptimeByHost(s.GetManageHost(), s.Port, timeout, tlsCfg)
 			},
+			Component: c,
 		}, c.Topology})
 	}
 	return ins

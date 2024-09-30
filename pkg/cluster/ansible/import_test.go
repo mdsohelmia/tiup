@@ -124,8 +124,11 @@ server_configs:
         binlog.enable: true
     tikv: {}
     pd: {}
+    tso: {}
+    scheduling: {}
     tidb_dashboard: {}
     tiflash: {}
+    tiproxy: {}
     tiflash-learner: {}
     pump: {}
     drainer: {}
@@ -135,6 +138,7 @@ server_configs:
 tidb_servers: []
 tikv_servers: []
 tiflash_servers: []
+tiproxy_servers: []
 pd_servers: []
 monitoring_servers: []
 `)

@@ -16,25 +16,27 @@ package instance
 import (
 	"context"
 	"fmt"
-	"os"
-	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/pingcap/errors"
-	tiupexec "github.com/pingcap/tiup/pkg/exec"
+	"github.com/pingcap/tiup/pkg/cluster/api"
 	"github.com/pingcap/tiup/pkg/utils"
 )
 
 // TiKVInstance represent a running tikv-server
 type TiKVInstance struct {
 	instance
-	pds []*PDInstance
+	pds  []*PDInstance
+	tsos []*PDInstance
 	Process
+	isCSEMode  bool
+	cseOpts    CSEOptions
+	isPDMSMode bool
 }
 
 // NewTiKVInstance return a TiKVInstance
-func NewTiKVInstance(binPath string, dir, host, configPath string, id int, port int, pds []*PDInstance) *TiKVInstance {
+func NewTiKVInstance(binPath string, dir, host, configPath string, portOffset int, id int, port int, pds []*PDInstance, tsos []*PDInstance, isCSEMode bool, cseOptions CSEOptions, isPDMSMode bool) *TiKVInstance {
 	if port <= 0 {
 		port = 20160
 	}
@@ -44,11 +46,15 @@ func NewTiKVInstance(binPath string, dir, host, configPath string, id int, port 
 			ID:         id,
 			Dir:        dir,
 			Host:       host,
-			Port:       utils.MustGetFreePort(host, port),
-			StatusPort: utils.MustGetFreePort(host, 20180),
+			Port:       utils.MustGetFreePort(host, port, portOffset),
+			StatusPort: utils.MustGetFreePort(host, 20180, portOffset),
 			ConfigPath: configPath,
 		},
-		pds: pds,
+		pds:        pds,
+		tsos:       tsos,
+		isCSEMode:  isCSEMode,
+		cseOpts:    cseOptions,
+		isPDMSMode: isPDMSMode,
 	}
 }
 
@@ -58,9 +64,31 @@ func (inst *TiKVInstance) Addr() string {
 }
 
 // Start calls set inst.cmd and Start
-func (inst *TiKVInstance) Start(ctx context.Context, version utils.Version) error {
-	if err := inst.checkConfig(); err != nil {
+func (inst *TiKVInstance) Start(ctx context.Context) error {
+	configPath := filepath.Join(inst.Dir, "tikv.toml")
+	if err := prepareConfig(
+		configPath,
+		inst.ConfigPath,
+		inst.getConfig(),
+	); err != nil {
 		return err
+	}
+
+	// Need to check tso status
+	if inst.isPDMSMode {
+		var tsoEnds []string
+		for _, pd := range inst.tsos {
+			tsoEnds = append(tsoEnds, fmt.Sprintf("%s:%d", AdvertiseHost(pd.Host), pd.StatusPort))
+		}
+		pdcli := api.NewPDClient(ctx,
+			tsoEnds, 10*time.Second, nil,
+		)
+		if err := pdcli.CheckTSOHealth(&utils.RetryOption{
+			Delay:   time.Second * 5,
+			Timeout: time.Second * 300,
+		}); err != nil {
+			return err
+		}
 	}
 
 	endpoints := pdEndpoints(inst.pds, true)
@@ -69,16 +97,12 @@ func (inst *TiKVInstance) Start(ctx context.Context, version utils.Version) erro
 		fmt.Sprintf("--advertise-addr=%s", utils.JoinHostPort(AdvertiseHost(inst.Host), inst.Port)),
 		fmt.Sprintf("--status-addr=%s", utils.JoinHostPort(inst.Host, inst.StatusPort)),
 		fmt.Sprintf("--pd-endpoints=%s", strings.Join(endpoints, ",")),
-		fmt.Sprintf("--config=%s", inst.ConfigPath),
+		fmt.Sprintf("--config=%s", configPath),
 		fmt.Sprintf("--data-dir=%s", filepath.Join(inst.Dir, "data")),
 		fmt.Sprintf("--log-file=%s", inst.LogFile()),
 	}
 
 	envs := []string{"MALLOC_CONF=prof:true,prof_active:false"}
-	var err error
-	if inst.BinPath, err = tiupexec.PrepareBinary("tikv", version, inst.BinPath); err != nil {
-		return err
-	}
 	inst.Process = &process{cmd: PrepareCommand(ctx, inst.BinPath, args, envs, inst.Dir)}
 
 	logIfErr(inst.Process.SetOutputFile(inst.LogFile()))
@@ -98,33 +122,4 @@ func (inst *TiKVInstance) LogFile() string {
 // StoreAddr return the store address of TiKV
 func (inst *TiKVInstance) StoreAddr() string {
 	return utils.JoinHostPort(AdvertiseHost(inst.Host), inst.Port)
-}
-
-func (inst *TiKVInstance) checkConfig() error {
-	if err := utils.MkdirAll(inst.Dir, 0755); err != nil {
-		return err
-	}
-	if inst.ConfigPath == "" {
-		inst.ConfigPath = path.Join(inst.Dir, "tikv.toml")
-	}
-
-	_, err := os.Stat(inst.ConfigPath)
-	if err == nil || os.IsExist(err) {
-		return nil
-	}
-	if !os.IsNotExist(err) {
-		return errors.Trace(err)
-	}
-
-	cf, err := os.Create(inst.ConfigPath)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	defer cf.Close()
-	if err := writeTiKVConfig(cf); err != nil {
-		return errors.Trace(err)
-	}
-
-	return nil
 }

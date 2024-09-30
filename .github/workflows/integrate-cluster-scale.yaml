@@ -39,13 +39,14 @@ jobs:
           - 'test_scale_tools'
           - 'test_scale_core_tls'
           - 'test_scale_tools_tls'
+          - 'test_scale_tiproxy'
     env:
       working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}
     steps:
-      - name: Set up Go 1.19
-        uses: actions/setup-go@v2
+      - name: Set up Go 1.21
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.19.x
+          go-version: 1.21.x
         id: go
 
       - name: Check out code into the Go module directory
@@ -83,6 +84,7 @@ jobs:
 
       - name: Collect component log
         working-directory: ${{ env.working-directory }}
+        if: ${{ failure() }}
         # if: always()
         run: |
           docker exec tiup-cluster-control bash /tiup-cluster/tests/tiup-cluster/script/pull_log.sh /tiup-cluster/logs
@@ -90,6 +92,7 @@ jobs:
 
       - name: Detect error log
         working-directory: ${{ env.working-directory }}
+        if: ${{ failure() }}
         # if: always()
         run: |
           bash ./tests/tiup-cluster/script/detect_error.sh ./logs/

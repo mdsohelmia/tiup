@@ -29,7 +29,6 @@ import (
 
 	"github.com/fatih/color"
 	perrs "github.com/pingcap/errors"
-	"github.com/pingcap/tiup/pkg/cluster/spec"
 	"github.com/pingcap/tiup/pkg/environment"
 	"github.com/pingcap/tiup/pkg/localdata"
 	"github.com/pingcap/tiup/pkg/repository"
@@ -365,7 +364,11 @@ func newMirrorRenewCmd() *cobra.Command {
 				if !v1manifest.IsExpirationError(perrs.Cause(err)) {
 					return err
 				}
-				fmt.Println(err)
+				fmt.Printf("Ignoring expiration error: %s", err)
+			}
+
+			if m == nil {
+				return errors.New("got nil manifest")
 			}
 
 			if days > 0 {
@@ -990,10 +993,6 @@ func newMirrorCloneCmd() *cobra.Command {
 				}
 			}()
 
-			var versionMapper = func(comp string) string {
-				return spec.TiDBComponentVersion(comp, "")
-			}
-
 			// format input versions
 			versionList := make([]string, 0)
 			for _, ver := range args[1:] {
@@ -1004,7 +1003,7 @@ func newMirrorCloneCmd() *cobra.Command {
 				versionList = append(versionList, v)
 			}
 
-			return repository.CloneMirror(repo, components, versionMapper, args[0], versionList, options)
+			return repository.CloneMirror(repo, components, args[0], versionList, options)
 		},
 	}
 

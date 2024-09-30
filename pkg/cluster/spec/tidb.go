@@ -32,7 +32,7 @@ import (
 // TiDBSpec represents the TiDB topology specification in topology.yaml
 type TiDBSpec struct {
 	Host            string               `yaml:"host"`
-	ManageHost      string               `yaml:"manage_host,omitempty"`
+	ManageHost      string               `yaml:"manage_host,omitempty" validate:"manage_host:editable"`
 	ListenHost      string               `yaml:"listen_host,omitempty"`
 	AdvertiseAddr   string               `yaml:"advertise_address,omitempty"`
 	SSHPort         int                  `yaml:"ssh_port,omitempty" validate:"ssh_port:editable"`
@@ -43,6 +43,7 @@ type TiDBSpec struct {
 	StatusPort      int                  `yaml:"status_port" default:"10080"`
 	DeployDir       string               `yaml:"deploy_dir,omitempty"`
 	LogDir          string               `yaml:"log_dir,omitempty"`
+	Source          string               `yaml:"source,omitempty" validate:"source:editable"`
 	NumaNode        string               `yaml:"numa_node,omitempty" validate:"numa_node:editable"`
 	NumaCores       string               `yaml:"numa_cores,omitempty" validate:"numa_cores:editable"`
 	Config          map[string]any       `yaml:"config,omitempty" validate:"config:ignore"`
@@ -70,6 +71,14 @@ func (s *TiDBSpec) GetMainPort() int {
 	return s.Port
 }
 
+// GetManageHost returns the manage host of the instance
+func (s *TiDBSpec) GetManageHost() string {
+	if s.ManageHost != "" {
+		return s.ManageHost
+	}
+	return s.Host
+}
+
 // IsImported returns if the node is imported from TiDB-Ansible
 func (s *TiDBSpec) IsImported() bool {
 	return s.Imported
@@ -93,6 +102,29 @@ func (c *TiDBComponent) Role() string {
 	return ComponentTiDB
 }
 
+// Source implements Component interface.
+func (c *TiDBComponent) Source() string {
+	source := c.Topology.ComponentSources.TiDB
+	if source != "" {
+		return source
+	}
+	return ComponentTiDB
+}
+
+// CalculateVersion implements the Component interface
+func (c *TiDBComponent) CalculateVersion(clusterVersion string) string {
+	version := c.Topology.ComponentVersions.TiDB
+	if version == "" {
+		version = clusterVersion
+	}
+	return version
+}
+
+// SetVersion implements Component interface.
+func (c *TiDBComponent) SetVersion(version string) {
+	c.Topology.ComponentVersions.TiDB = version
+}
+
 // Instances implements Component interface.
 func (c *TiDBComponent) Instances() []Instance {
 	ins := make([]Instance, 0, len(c.Topology.TiDBServers))
@@ -103,9 +135,12 @@ func (c *TiDBComponent) Instances() []Instance {
 			Name:         c.Name(),
 			Host:         s.Host,
 			ManageHost:   s.ManageHost,
-			ListenHost:   s.ListenHost,
+			ListenHost:   utils.Ternary(s.ListenHost != "", s.ListenHost, c.Topology.BaseTopo().GlobalOptions.ListenHost).(string),
 			Port:         s.Port,
 			SSHP:         s.SSHPort,
+			Source:       s.Source,
+			NumaNode:     s.NumaNode,
+			NumaCores:    s.NumaCores,
 
 			Ports: []int{
 				s.Port,
@@ -115,11 +150,12 @@ func (c *TiDBComponent) Instances() []Instance {
 				s.DeployDir,
 			},
 			StatusFn: func(_ context.Context, timeout time.Duration, tlsCfg *tls.Config, _ ...string) string {
-				return statusByHost(s.Host, s.StatusPort, "/status", timeout, tlsCfg)
+				return statusByHost(s.GetManageHost(), s.StatusPort, "/status", timeout, tlsCfg)
 			},
 			UptimeFn: func(_ context.Context, timeout time.Duration, tlsCfg *tls.Config) time.Duration {
-				return UptimeByHost(s.Host, s.StatusPort, timeout, tlsCfg)
+				return UptimeByHost(s.GetManageHost(), s.StatusPort, timeout, tlsCfg)
 			},
+			Component: c,
 		}, c.Topology})
 	}
 	return ins
@@ -147,6 +183,7 @@ func (i *TiDBInstance) InitConfig(
 
 	enableTLS := topo.GlobalOptions.TLSEnabled
 	spec := i.InstanceSpec.(*TiDBSpec)
+	version := i.CalculateVersion(clusterVersion)
 
 	pds := []string{}
 	for _, pdspec := range topo.PDServers {
@@ -158,7 +195,7 @@ func (i *TiDBInstance) InitConfig(
 		ListenHost:     i.GetListenHost(),
 		AdvertiseAddr:  utils.Ternary(spec.AdvertiseAddr != "", spec.AdvertiseAddr, spec.Host).(string),
 		PD:             strings.Join(pds, ","),
-		SupportSecboot: tidbver.TiDBSupportSecureBoot(clusterVersion),
+		SupportSecboot: tidbver.TiDBSupportSecureBoot(version),
 
 		DeployDir: paths.Deploy,
 		LogDir:    paths.Log,
@@ -204,6 +241,11 @@ func (i *TiDBInstance) InitConfig(
 		}
 	}
 
+	spec.Config, err = i.setTiProxyConfig(ctx, topo, version, spec.Config, paths)
+	if err != nil {
+		return err
+	}
+
 	// set TLS configs
 	spec.Config, err = i.setTLSConfig(ctx, enableTLS, spec.Config, paths)
 	if err != nil {
@@ -214,7 +256,25 @@ func (i *TiDBInstance) InitConfig(
 		return err
 	}
 
-	return checkConfig(ctx, e, i.ComponentName(), clusterVersion, i.OS(), i.Arch(), i.ComponentName()+".toml", paths, nil)
+	return checkConfig(ctx, e, i.ComponentName(), i.ComponentSource(), version, i.OS(), i.Arch(), i.ComponentName()+".toml", paths)
+}
+
+// setTiProxyConfig sets tiproxy session certs
+func (i *TiDBInstance) setTiProxyConfig(ctx context.Context, topo *Specification, version string, configs map[string]any, paths meta.DirPaths) (map[string]any, error) {
+	if len(topo.TiProxyServers) == 0 || !tidbver.TiDBSupportTiproxy(version) {
+		return configs, nil
+	}
+	if configs == nil {
+		configs = make(map[string]any)
+	}
+	// Overwrite users' configs just like TLS configs.
+	configs["security.session-token-signing-cert"] = fmt.Sprintf(
+		"%s/tls/tiproxy-session.crt",
+		paths.Deploy)
+	configs["security.session-token-signing-key"] = fmt.Sprintf(
+		"%s/tls/tiproxy-session.key",
+		paths.Deploy)
+	return configs, nil
 }
 
 // setTLSConfig set TLS Config to support enable/disable TLS

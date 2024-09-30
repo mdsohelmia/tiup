@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	perrs "github.com/pingcap/errors"
 	"github.com/pingcap/tiup/pkg/cluster/api"
 	"github.com/pingcap/tiup/pkg/cluster/ctxt"
@@ -58,7 +59,7 @@ func Destroy(
 			instCount[inst.GetManageHost()]--
 			if instCount[inst.GetManageHost()] == 0 {
 				if cluster.GetMonitoredOptions() != nil {
-					if err := DestroyMonitored(ctx, inst, cluster.GetMonitoredOptions(), options.OptTimeout); err != nil && !options.Force {
+					if err := DestroyMonitored(ctx, inst, cluster.GetMonitoredOptions(), options.OptTimeout, cluster.BaseTopo().GlobalOptions.SystemdMode); err != nil && !options.Force {
 						return err
 					}
 				}
@@ -136,13 +137,13 @@ func StopAndDestroyInstance(
 		monitoredOptions := cluster.GetMonitoredOptions()
 
 		if monitoredOptions != nil && !instance.IgnoreMonitorAgent() {
-			if err := StopMonitored(ctx, []string{instance.GetManageHost()}, noAgentHosts, monitoredOptions, options.OptTimeout); err != nil {
+			if err := StopMonitored(ctx, []string{instance.GetManageHost()}, noAgentHosts, monitoredOptions, options.OptTimeout, string(cluster.BaseTopo().GlobalOptions.SystemdMode)); err != nil {
 				if !ignoreErr {
 					return perrs.Annotatef(err, "failed to stop monitor")
 				}
 				logger.Warnf("failed to stop %s: %v", "monitor", err)
 			}
-			if err := DestroyMonitored(ctx, instance, monitoredOptions, options.OptTimeout); err != nil {
+			if err := DestroyMonitored(ctx, instance, monitoredOptions, options.OptTimeout, cluster.BaseTopo().GlobalOptions.SystemdMode); err != nil {
 				if !ignoreErr {
 					return perrs.Annotatef(err, "failed to destroy monitor")
 				}
@@ -240,7 +241,7 @@ func DeletePublicKey(ctx context.Context, host string) error {
 }
 
 // DestroyMonitored destroy the monitored service.
-func DestroyMonitored(ctx context.Context, inst spec.Instance, options *spec.MonitoredOptions, timeout uint64) error {
+func DestroyMonitored(ctx context.Context, inst spec.Instance, options *spec.MonitoredOptions, timeout uint64, systemdMode spec.SystemdMode) error {
 	e := ctxt.GetInner(ctx).Get(inst.GetManageHost())
 	logger := ctx.Value(logprinter.ContextKeyLogger).(*logprinter.Logger)
 
@@ -261,13 +262,18 @@ func DestroyMonitored(ctx context.Context, inst spec.Instance, options *spec.Mon
 		logger.Warnf("Monitored deploy dir %s not deleted for TiDB-Ansible imported instance %s.",
 			options.DeployDir, inst.InstanceName())
 	}
-
-	delPaths = append(delPaths, fmt.Sprintf("/etc/systemd/system/%s-%d.service", spec.ComponentNodeExporter, options.NodeExporterPort))
-	delPaths = append(delPaths, fmt.Sprintf("/etc/systemd/system/%s-%d.service", spec.ComponentBlackboxExporter, options.BlackboxExporterPort))
+	systemdDir := "/etc/systemd/system/"
+	sudo := true
+	if systemdMode == spec.UserMode {
+		systemdDir = "~/.config/systemd/user/"
+		sudo = false
+	}
+	delPaths = append(delPaths, fmt.Sprintf("%s%s-%d.service", systemdDir, spec.ComponentNodeExporter, options.NodeExporterPort))
+	delPaths = append(delPaths, fmt.Sprintf("%s%s-%d.service", systemdDir, spec.ComponentBlackboxExporter, options.BlackboxExporterPort))
 
 	c := module.ShellModuleConfig{
 		Command:  fmt.Sprintf("rm -rf %s;", strings.Join(delPaths, " ")),
-		Sudo:     true, // the .service files are in a directory owned by root
+		Sudo:     sudo, // the .service files are in a directory owned by root
 		Chdir:    "",
 		UseShell: false,
 	}
@@ -302,7 +308,7 @@ func DestroyMonitored(ctx context.Context, inst spec.Instance, options *spec.Mon
 }
 
 // CleanupComponent cleanup the instances
-func CleanupComponent(ctx context.Context, delFileMaps map[string]set.StringSet) error {
+func CleanupComponent(ctx context.Context, delFileMaps map[string]set.StringSet, sudo bool) error {
 	logger := ctx.Value(logprinter.ContextKeyLogger).(*logprinter.Logger)
 	for host, delFiles := range delFileMaps {
 		e := ctxt.GetInner(ctx).Get(host)
@@ -310,7 +316,7 @@ func CleanupComponent(ctx context.Context, delFileMaps map[string]set.StringSet)
 		logger.Debugf("Deleting paths on %s: %s", host, strings.Join(delFiles.Slice(), " "))
 		c := module.ShellModuleConfig{
 			Command:  fmt.Sprintf("rm -rf %s;", strings.Join(delFiles.Slice(), " ")),
-			Sudo:     true, // the .service files are in a directory owned by root
+			Sudo:     sudo, // the .service files are in a directory owned by root
 			Chdir:    "",
 			UseShell: true,
 		}
@@ -430,31 +436,34 @@ func DestroyComponent(ctx context.Context, instances []spec.Instance, cls spec.T
 			delPaths.Insert(deployDir)
 		}
 
+		systemdDir := "/etc/systemd/system/"
+		sudo := true
+		if cls.BaseTopo().GlobalOptions.SystemdMode == spec.UserMode {
+			systemdDir = "~/.config/systemd/user/"
+			sudo = false
+		}
+
 		if svc := ins.ServiceName(); svc != "" {
-			delPaths.Insert(fmt.Sprintf("/etc/systemd/system/%s", svc))
+			delPaths.Insert(fmt.Sprintf("%s%s", systemdDir, svc))
 		}
 		logger.Debugf("Deleting paths on %s: %s", ins.GetManageHost(), strings.Join(delPaths.Slice(), " "))
-		c := module.ShellModuleConfig{
-			Command:  fmt.Sprintf("rm -rf %s;", strings.Join(delPaths.Slice(), " ")),
-			Sudo:     true, // the .service files are in a directory owned by root
-			Chdir:    "",
-			UseShell: false,
-		}
-		shell := module.NewShellModule(c)
-		stdout, stderr, err := shell.Execute(ctx, e)
+		for _, delPath := range delPaths.Slice() {
+			c := module.ShellModuleConfig{
+				Command:  fmt.Sprintf("rm -rf %s;", delPath),
+				Sudo:     sudo, // the .service files are in a directory owned by root
+				Chdir:    "",
+				UseShell: false,
+			}
+			shell := module.NewShellModule(c)
+			_, _, err := shell.Execute(ctx, e)
 
-		if len(stdout) > 0 {
-			fmt.Println(string(stdout))
-		}
-		if len(stderr) > 0 {
-			logger.Errorf(string(stderr))
-		}
-
-		if err != nil {
-			return perrs.Annotatef(err, "failed to destroy: %s", ins.GetManageHost())
+			if err != nil {
+				// Ignore error and continue.For example, deleting a mount point will result in a "Device or resource busy" error.
+				logger.Warnf(color.YellowString("Warn: failed to delete path \"%s\" on %s.Please check this error message and manually delete if necessary.\nerrmsg: %s", delPath, ins.GetManageHost(), err))
+			}
 		}
 
-		logger.Infof("Destroy %s success", ins.GetManageHost())
+		logger.Infof("Destroy %s finished", ins.GetManageHost())
 		logger.Infof("- Destroy %s paths: %v", ins.ComponentName(), delPaths.Slice())
 	}
 
@@ -497,7 +506,7 @@ func DestroyClusterTombstone(
 		pdEndpoints = strings.Split(forcePDEndpoints, ",")
 		logger.Warnf("%s is set, using %s as PD endpoints", EnvNamePDEndpointOverwrite, pdEndpoints)
 	} else {
-		pdEndpoints = cluster.GetPDList()
+		pdEndpoints = cluster.GetPDListWithManageHost()
 	}
 
 	var pdClient = api.NewPDClient(ctx, pdEndpoints, 10*time.Second, tlsCfg)

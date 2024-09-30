@@ -6,11 +6,15 @@ global:
   # # group is used to specify the group name the user belong to,if it's not the same as user.
   # group: "tidb"
   # # SSH port of servers in the managed cluster.
+  # # systemd_mode is used to select whether to use sudo permissions. When its value is set to user, there is no need to add global.user to sudoers. The default value is system.
+  # systemd_mode: "system"
   ssh_port: 22
   # # Storage directory for cluster deployment files, startup scripts, and configuration files.
   deploy_dir: "/tidb-deploy"
   # # TiDB Cluster data storage directory
   data_dir: "/tidb-data"
+  # # default listen_host for all components
+  listen_host: 0.0.0.0
   # # Supported values: "amd64", "arm64" (default: "amd64")
   arch: "amd64"
   # # Resource Control is used to limit the resource of an instance.
@@ -235,6 +239,7 @@ tiflash_servers:
     # # SSH port of the server.
     # ssh_port: 22
     # # TiFlash TCP Service port.
+    # # Since 7.1.0, it is not actually listened, and only being used as part of the instance identity.
     # tcp_port: 9000
     # # TiFlash raft service and coprocessor service listening address.
     # flash_service_port: 3930

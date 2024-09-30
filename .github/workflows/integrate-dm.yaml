@@ -42,10 +42,10 @@ jobs:
     env:
       working-directory: ${{ github.workspace }}/go/src/github.com/${{ github.repository }}
     steps:
-      - name: Set up Go 1.19
-        uses: actions/setup-go@v2
+      - name: Set up Go 1.21
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.19.x
+          go-version: 1.21.x
         id: go
 
       - name: Check out code into the Go module directory
@@ -87,8 +87,8 @@ jobs:
 
       - name: Collect component log
         working-directory: ${{ env.working-directory }}
+        if: ${{ failure() }}
         # if: ${{ failure() }}
-        if: always()
         run: |
           docker exec tiup-cluster-control bash -c 'mkdir -p /tiup-cluster/logs; [[ -d ~/.tiup/logs ]] && find ~/.tiup/logs -type f -name "*.log" -exec cp {} /tiup-cluster/logs \; || true'
           ls ${{ env.working-directory }}

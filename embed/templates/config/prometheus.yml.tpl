@@ -110,6 +110,22 @@ scrape_configs:
 {{- range .TiDBStatusAddrs}}
       - '{{.}}'
 {{- end}}
+  - job_name: "tiproxy"
+    honor_labels: true # don't overwrite job & instance labels
+    metrics_path: /api/metrics
+{{- if .TLSEnabled}}
+    scheme: https
+    tls_config:
+      insecure_skip_verify: false
+      ca_file: ../tls/ca.crt
+      cert_file: ../tls/prometheus.crt
+      key_file: ../tls/prometheus.pem
+{{- end}}
+    static_configs:
+    - targets:
+{{- range .TiProxyStatusAddrs}}
+      - '{{.}}'
+{{- end}}
   - job_name: "tikv"
     honor_labels: true # don't overwrite job & instance labels
 {{- if .TLSEnabled}}
@@ -138,6 +154,36 @@ scrape_configs:
     static_configs:
     - targets:
 {{- range .PDAddrs}}
+      - '{{.}}'
+{{- end}}
+  - job_name: "tso"
+    honor_labels: true # don't overwrite job & instance labels
+{{- if .TLSEnabled}}
+    scheme: https
+    tls_config:
+      insecure_skip_verify: false
+      ca_file: ../tls/ca.crt
+      cert_file: ../tls/prometheus.crt
+      key_file: ../tls/prometheus.pem
+{{- end}}
+    static_configs:
+    - targets:
+{{- range .TSOAddrs}}
+      - '{{.}}'
+{{- end}}
+  - job_name: "scheduling"
+    honor_labels: true # don't overwrite job & instance labels
+{{- if .TLSEnabled}}
+    scheme: https
+    tls_config:
+      insecure_skip_verify: false
+      ca_file: ../tls/ca.crt
+      cert_file: ../tls/prometheus.crt
+      key_file: ../tls/prometheus.pem
+{{- end}}
+    static_configs:
+    - targets:
+{{- range .SchedulingAddrs}}
       - '{{.}}'
 {{- end}}
 {{- if .TiFlashStatusAddrs}}
@@ -360,8 +406,10 @@ scrape_configs:
         target_label: __param_target
       - source_labels: [__param_target]
         target_label: instance
+      {{- if .BlackboxAddr}}
       - target_label: __address__
         replacement: '{{.BlackboxAddr}}'
+      {{- end}}
 {{- range $addr := .BlackboxExporterAddrs}}
   - job_name: "blackbox_exporter_{{$addr}}_icmp"
     scrape_interval: 6s

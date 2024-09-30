@@ -31,8 +31,11 @@ type PrometheusConfig struct {
 	TLSEnabled                bool
 	NodeExporterAddrs         []string
 	TiDBStatusAddrs           []string
+	TiProxyStatusAddrs        []string
 	TiKVStatusAddrs           []string
 	PDAddrs                   []string
+	TSOAddrs                  []string
+	SchedulingAddrs           []string
 	TiFlashStatusAddrs        []string
 	TiFlashLearnerStatusAddrs []string
 	PumpAddrs                 []string
@@ -79,6 +82,12 @@ func (c *PrometheusConfig) AddTiDB(ip string, port uint64) *PrometheusConfig {
 	return c
 }
 
+// AddTiProxy add a TiProxy address
+func (c *PrometheusConfig) AddTiProxy(ip string, port uint64) *PrometheusConfig {
+	c.TiProxyStatusAddrs = append(c.TiProxyStatusAddrs, utils.JoinHostPort(ip, int(port)))
+	return c
+}
+
 // AddTiKV add a TiKV address
 func (c *PrometheusConfig) AddTiKV(ip string, port uint64) *PrometheusConfig {
 	c.TiKVStatusAddrs = append(c.TiKVStatusAddrs, utils.JoinHostPort(ip, int(port)))
@@ -88,6 +97,18 @@ func (c *PrometheusConfig) AddTiKV(ip string, port uint64) *PrometheusConfig {
 // AddPD add a PD address
 func (c *PrometheusConfig) AddPD(ip string, port uint64) *PrometheusConfig {
 	c.PDAddrs = append(c.PDAddrs, utils.JoinHostPort(ip, int(port)))
+	return c
+}
+
+// AddTSO add a TSO address
+func (c *PrometheusConfig) AddTSO(ip string, port uint64) *PrometheusConfig {
+	c.TSOAddrs = append(c.TSOAddrs, utils.JoinHostPort(ip, int(port)))
+	return c
+}
+
+// AddScheduling add a scheduling address
+func (c *PrometheusConfig) AddScheduling(ip string, port uint64) *PrometheusConfig {
+	c.SchedulingAddrs = append(c.SchedulingAddrs, utils.JoinHostPort(ip, int(port)))
 	return c
 }
 

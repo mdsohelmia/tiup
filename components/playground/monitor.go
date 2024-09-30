@@ -29,24 +29,20 @@ import (
 )
 
 // ref: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#file_sd_config
-func (m *monitor) renderSDFile(cid2targets map[string][]string) error {
-	type Item struct {
-		Targets []string          `json:"targets"`
-		Labels  map[string]string `json:"labels"`
-	}
+func (m *monitor) renderSDFile(cid2targets map[string]instance.MetricAddr) error {
+	cid2targets["prometheus"] = instance.MetricAddr{Targets: []string{utils.JoinHostPort(m.host, m.port)}}
 
-	cid2targets["prometheus"] = []string{utils.JoinHostPort(m.host, m.port)}
+	var items []instance.MetricAddr
 
-	var items []Item
-
-	for id, targets := range cid2targets {
-		item := Item{
-			Targets: targets,
-			Labels: map[string]string{
-				"job": id,
-			},
+	for id, t := range cid2targets {
+		it := instance.MetricAddr{
+			Targets: t.Targets,
+			Labels:  map[string]string{"job": id},
 		}
-		items = append(items, item)
+		for k, v := range t.Labels {
+			it.Labels[k] = v
+		}
+		items = append(items, it)
 	}
 
 	data, err := json.MarshalIndent(&items, "", "\t")
@@ -82,15 +78,12 @@ func (m *monitor) wait() error {
 }
 
 // the cmd is not started after return
-func newMonitor(ctx context.Context, version string, host, dir string) (*monitor, error) {
+func newMonitor(ctx context.Context, version string, host, dir string, portOffset int) (*monitor, error) {
 	if err := utils.MkdirAll(dir, 0755); err != nil {
 		return nil, errors.AddStack(err)
 	}
 
-	port, err := utils.GetFreePort(host, 9090)
-	if err != nil {
-		return nil, err
-	}
+	port := utils.MustGetFreePort(host, 9090, portOffset)
 	addr := utils.JoinHostPort(host, port)
 
 	tmpl := `
@@ -136,6 +129,7 @@ scrape_configs:
 	}
 
 	var binPath string
+	var err error
 	if binPath, err = tiupexec.PrepareBinary("prometheus", utils.Version(version), binPath); err != nil {
 		return nil, err
 	}

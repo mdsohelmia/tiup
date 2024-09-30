@@ -20,14 +20,29 @@ import (
 	"path/filepath"
 	"strings"
 
-	tiupexec "github.com/pingcap/tiup/pkg/exec"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tiup/pkg/tidbver"
 	"github.com/pingcap/tiup/pkg/utils"
+)
+
+// TiFlashRole is the role of TiFlash.
+type TiFlashRole string
+
+const (
+	// TiFlashRoleNormal is used when TiFlash is not in disaggregated mode.
+	TiFlashRoleNormal TiFlashRole = "normal"
+
+	// TiFlashRoleDisaggWrite is used when TiFlash is in disaggregated mode and is the write node.
+	TiFlashRoleDisaggWrite TiFlashRole = "write"
+	// TiFlashRoleDisaggCompute is used when TiFlash is in disaggregated mode and is the compute node.
+	TiFlashRoleDisaggCompute TiFlashRole = "compute"
 )
 
 // TiFlashInstance represent a running TiFlash
 type TiFlashInstance struct {
 	instance
+	Role            TiFlashRole
+	cseOpts         CSEOptions
 	TCPPort         int
 	ServicePort     int
 	ProxyPort       int
@@ -38,10 +53,14 @@ type TiFlashInstance struct {
 }
 
 // NewTiFlashInstance return a TiFlashInstance
-func NewTiFlashInstance(binPath, dir, host, configPath string, id int, pds []*PDInstance, dbs []*TiDBInstance, version string) *TiFlashInstance {
+func NewTiFlashInstance(role TiFlashRole, cseOptions CSEOptions, binPath, dir, host, configPath string, portOffset int, id int, pds []*PDInstance, dbs []*TiDBInstance, version string) *TiFlashInstance {
+	if role != TiFlashRoleNormal && role != TiFlashRoleDisaggWrite && role != TiFlashRoleDisaggCompute {
+		panic(fmt.Sprintf("Unknown TiFlash role %s", role))
+	}
+
 	httpPort := 8123
 	if !tidbver.TiFlashNotNeedHTTPPortConfig(version) {
-		httpPort = utils.MustGetFreePort(host, httpPort)
+		httpPort = utils.MustGetFreePort(host, httpPort, portOffset)
 	}
 	return &TiFlashInstance{
 		instance: instance{
@@ -50,13 +69,15 @@ func NewTiFlashInstance(binPath, dir, host, configPath string, id int, pds []*PD
 			Dir:        dir,
 			Host:       host,
 			Port:       httpPort,
-			StatusPort: utils.MustGetFreePort(host, 8234),
+			StatusPort: utils.MustGetFreePort(host, 8234, portOffset),
 			ConfigPath: configPath,
 		},
-		TCPPort:         utils.MustGetFreePort(host, 9000),
-		ServicePort:     utils.MustGetFreePort(host, 3930),
-		ProxyPort:       utils.MustGetFreePort(host, 20170),
-		ProxyStatusPort: utils.MustGetFreePort(host, 20292),
+		Role:            role,
+		cseOpts:         cseOptions,
+		TCPPort:         utils.MustGetFreePort(host, 9100, portOffset), // 9000 for default object store port
+		ServicePort:     utils.MustGetFreePort(host, 3930, portOffset),
+		ProxyPort:       utils.MustGetFreePort(host, 20170, portOffset),
+		ProxyStatusPort: utils.MustGetFreePort(host, 20292, portOffset),
 		pds:             pds,
 		dbs:             dbs,
 	}
@@ -75,45 +96,83 @@ func (inst *TiFlashInstance) StatusAddrs() (addrs []string) {
 }
 
 // Start calls set inst.cmd and Start
-func (inst *TiFlashInstance) Start(ctx context.Context, version utils.Version) error {
-	if !tidbver.TiFlashPlaygroundNewStartMode(version.String()) {
-		return inst.startOld(ctx, version)
+func (inst *TiFlashInstance) Start(ctx context.Context) error {
+	if !tidbver.TiFlashPlaygroundNewStartMode(inst.Version.String()) {
+		return inst.startOld(ctx, inst.Version)
+	}
+
+	proxyConfigPath := filepath.Join(inst.Dir, "tiflash_proxy.toml")
+	if err := prepareConfig(
+		proxyConfigPath,
+		"",
+		inst.getProxyConfig(),
+	); err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(inst.Dir, "tiflash.toml")
+	if err := prepareConfig(
+		configPath,
+		inst.ConfigPath,
+		inst.getConfig(),
+	); err != nil {
+		return err
 	}
 
 	endpoints := pdEndpoints(inst.pds, false)
 
 	args := []string{
 		"server",
-	}
-	if inst.ConfigPath != "" {
-		args = append(args, fmt.Sprintf("--config-file=%s", inst.ConfigPath))
-	}
-	args = append(args,
+		fmt.Sprintf("--config-file=%s", configPath),
 		"--",
-		fmt.Sprintf("--tmp_path=%s", filepath.Join(inst.Dir, "tmp")),
-		fmt.Sprintf("--path=%s", filepath.Join(inst.Dir, "data")),
-		fmt.Sprintf("--listen_host=%s", inst.Host),
-		fmt.Sprintf("--tcp_port=%d", inst.TCPPort),
-		fmt.Sprintf("--logger.log=%s", inst.LogFile()),
-		fmt.Sprintf("--logger.errorlog=%s", filepath.Join(inst.Dir, "tiflash_error.log")),
-		fmt.Sprintf("--status.metrics_port=%d", inst.StatusPort),
-		fmt.Sprintf("--flash.service_addr=%s", utils.JoinHostPort(AdvertiseHost(inst.Host), inst.ServicePort)),
-		fmt.Sprintf("--raft.pd_addr=%s", strings.Join(endpoints, ",")),
-		fmt.Sprintf("--flash.proxy.addr=%s", utils.JoinHostPort(inst.Host, inst.ProxyPort)),
-		fmt.Sprintf("--flash.proxy.advertise-addr=%s", utils.JoinHostPort(AdvertiseHost(inst.Host), inst.ProxyPort)),
-		fmt.Sprintf("--flash.proxy.status-addr=%s", utils.JoinHostPort(inst.Host, inst.ProxyStatusPort)),
-		fmt.Sprintf("--flash.proxy.data-dir=%s", filepath.Join(inst.Dir, "proxy_data")),
-		fmt.Sprintf("--flash.proxy.log-file=%s", filepath.Join(inst.Dir, "tiflash_tikv.log")),
-	)
-
-	var err error
-	if inst.BinPath, err = tiupexec.PrepareBinary("tiflash", version, inst.BinPath); err != nil {
-		return err
 	}
+	runtimeConfig := [][]string{
+		{"path", filepath.Join(inst.Dir, "data")},
+		{"listen_host", inst.Host},
+		{"logger.log", inst.LogFile()},
+		{"logger.errorlog", filepath.Join(inst.Dir, "tiflash_error.log")},
+		{"status.metrics_port", fmt.Sprintf("%d", inst.StatusPort)},
+		{"flash.service_addr", utils.JoinHostPort(AdvertiseHost(inst.Host), inst.ServicePort)},
+		{"raft.pd_addr", strings.Join(endpoints, ",")},
+		{"flash.proxy.addr", utils.JoinHostPort(inst.Host, inst.ProxyPort)},
+		{"flash.proxy.advertise-addr", utils.JoinHostPort(AdvertiseHost(inst.Host), inst.ProxyPort)},
+		{"flash.proxy.status-addr", utils.JoinHostPort(inst.Host, inst.ProxyStatusPort)},
+		{"flash.proxy.data-dir", filepath.Join(inst.Dir, "proxy_data")},
+		{"flash.proxy.log-file", filepath.Join(inst.Dir, "tiflash_tikv.log")},
+	}
+	userConfig, err := unmarshalConfig(configPath)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for _, arg := range runtimeConfig {
+		// if user has set the config, skip it
+		if !isKeyPresentInMap(userConfig, arg[0]) {
+			args = append(args, fmt.Sprintf("--%s=%s", arg[0], arg[1]))
+		}
+	}
+
 	inst.Process = &process{cmd: PrepareCommand(ctx, inst.BinPath, args, nil, inst.Dir)}
 
 	logIfErr(inst.Process.SetOutputFile(inst.LogFile()))
 	return inst.Process.Start()
+}
+
+func isKeyPresentInMap(m map[string]any, key string) bool {
+	keys := strings.Split(key, ".")
+	currentMap := m
+
+	for i := 0; i < len(keys); i++ {
+		if _, ok := currentMap[keys[i]]; !ok {
+			return false
+		}
+
+		// If the current value is a nested map, update the current map to the nested map
+		if innerMap, ok := currentMap[keys[i]].(map[string]any); ok {
+			currentMap = innerMap
+		}
+	}
+
+	return true
 }
 
 // Component return the component name.

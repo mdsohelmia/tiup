@@ -47,7 +47,7 @@ const (
 // TiKVSpec represents the TiKV topology specification in topology.yaml
 type TiKVSpec struct {
 	Host                string               `yaml:"host"`
-	ManageHost          string               `yaml:"manage_host,omitempty"`
+	ManageHost          string               `yaml:"manage_host,omitempty" validate:"manage_host:editable"`
 	ListenHost          string               `yaml:"listen_host,omitempty"`
 	AdvertiseAddr       string               `yaml:"advertise_addr,omitempty"`
 	SSHPort             int                  `yaml:"ssh_port,omitempty" validate:"ssh_port:editable"`
@@ -61,6 +61,7 @@ type TiKVSpec struct {
 	DataDir             string               `yaml:"data_dir,omitempty"`
 	LogDir              string               `yaml:"log_dir,omitempty"`
 	Offline             bool                 `yaml:"offline,omitempty"`
+	Source              string               `yaml:"source,omitempty" validate:"source:editable"`
 	NumaNode            string               `yaml:"numa_node,omitempty" validate:"numa_node:editable"`
 	NumaCores           string               `yaml:"numa_cores,omitempty" validate:"numa_cores:editable"`
 	Config              map[string]any       `yaml:"config,omitempty" validate:"config:ignore"`
@@ -113,6 +114,14 @@ func (s *TiKVSpec) SSH() (string, int) {
 // GetMainPort returns the main port of the instance
 func (s *TiKVSpec) GetMainPort() int {
 	return s.Port
+}
+
+// GetManageHost returns the manage host of the instance
+func (s *TiKVSpec) GetManageHost() string {
+	if s.ManageHost != "" {
+		return s.ManageHost
+	}
+	return s.Host
 }
 
 // IsImported returns if the node is imported from TiDB-Ansible
@@ -168,6 +177,29 @@ func (c *TiKVComponent) Role() string {
 	return ComponentTiKV
 }
 
+// Source implements Component interface.
+func (c *TiKVComponent) Source() string {
+	source := c.Topology.ComponentSources.TiKV
+	if source != "" {
+		return source
+	}
+	return ComponentTiKV
+}
+
+// CalculateVersion implements the Component interface
+func (c *TiKVComponent) CalculateVersion(clusterVersion string) string {
+	version := c.Topology.ComponentVersions.TiKV
+	if version == "" {
+		version = clusterVersion
+	}
+	return version
+}
+
+// SetVersion implements Component interface.
+func (c *TiKVComponent) SetVersion(version string) {
+	c.Topology.ComponentVersions.TiKV = version
+}
+
 // Instances implements Component interface.
 func (c *TiKVComponent) Instances() []Instance {
 	ins := make([]Instance, 0, len(c.Topology.TiKVServers))
@@ -178,9 +210,12 @@ func (c *TiKVComponent) Instances() []Instance {
 			Name:         c.Name(),
 			Host:         s.Host,
 			ManageHost:   s.ManageHost,
-			ListenHost:   s.ListenHost,
+			ListenHost:   utils.Ternary(s.ListenHost != "", s.ListenHost, c.Topology.BaseTopo().GlobalOptions.ListenHost).(string),
 			Port:         s.Port,
 			SSHP:         s.SSHPort,
+			Source:       s.Source,
+			NumaNode:     s.NumaNode,
+			NumaCores:    s.NumaCores,
 
 			Ports: []int{
 				s.Port,
@@ -192,8 +227,9 @@ func (c *TiKVComponent) Instances() []Instance {
 			},
 			StatusFn: s.Status,
 			UptimeFn: func(_ context.Context, timeout time.Duration, tlsCfg *tls.Config) time.Duration {
-				return UptimeByHost(s.Host, s.StatusPort, timeout, tlsCfg)
+				return UptimeByHost(s.GetManageHost(), s.StatusPort, timeout, tlsCfg)
 			},
+			Component: c,
 		}, c.Topology, 0})
 	}
 	return ins
@@ -291,7 +327,7 @@ func (i *TiKVInstance) InitConfig(
 		return err
 	}
 
-	return checkConfig(ctx, e, i.ComponentName(), clusterVersion, i.OS(), i.Arch(), i.ComponentName()+".toml", paths, nil)
+	return checkConfig(ctx, e, i.ComponentName(), i.ComponentSource(), clusterVersion, i.OS(), i.Arch(), i.ComponentName()+".toml", paths)
 }
 
 // setTLSConfig set TLS Config to support enable/disable TLS
@@ -367,7 +403,7 @@ func (i *TiKVInstance) PreRestart(ctx context.Context, topo Topology, apiTimeout
 		return nil
 	}
 
-	pdClient := api.NewPDClient(ctx, tidbTopo.GetPDList(), 5*time.Second, tlsCfg)
+	pdClient := api.NewPDClient(ctx, tidbTopo.GetPDListWithManageHost(), 5*time.Second, tlsCfg)
 
 	// Make sure there's leader of PD.
 	// Although we evict pd leader when restart pd,
@@ -405,7 +441,7 @@ func (i *TiKVInstance) PostRestart(ctx context.Context, topo Topology, tlsCfg *t
 		return nil
 	}
 
-	pdClient := api.NewPDClient(ctx, tidbTopo.GetPDList(), 5*time.Second, tlsCfg)
+	pdClient := api.NewPDClient(ctx, tidbTopo.GetPDListWithManageHost(), 5*time.Second, tlsCfg)
 
 	// remove store leader evict scheduler after restart
 	if err := pdClient.RemoveStoreEvict(addr(i.InstanceSpec.(*TiKVSpec))); err != nil {
@@ -443,7 +479,7 @@ func genLeaderCounter(topo *Specification, tlsCfg *tls.Config) func(string) (int
 		for _, kv := range topo.TiKVServers {
 			kvid := utils.JoinHostPort(kv.Host, kv.Port)
 			if id == kvid {
-				statusAddress = utils.JoinHostPort(kv.Host, kv.StatusPort)
+				statusAddress = utils.JoinHostPort(kv.GetManageHost(), kv.StatusPort)
 				break
 			}
 			foundIds = append(foundIds, kvid)
